@@ -27,6 +27,10 @@ def run_pipeline(config: IterReasonConfig):
     setup_logging(config)
     set_seed(config.seed)
     log(f"Config:\n{config}")
+    if config.use_wandb:
+        # previously wandb_project was never applied
+        os.environ.setdefault("WANDB_PROJECT", config.wandb_project)
+    every_eval_full = not config.full_eval_only_final
 
     # ── Data ───────────────────────────────────────────────────
     train_dataset = load_training_data(config)
@@ -37,7 +41,7 @@ def run_pipeline(config: IterReasonConfig):
     log("Evaluating base model (M0) …")
     log("=" * 60)
     base_metrics = evaluate_model(
-        config.base_model, eval_datasets, config, full=False,
+        config.base_model, eval_datasets, config, full=every_eval_full,
     )
     records = [{"iteration": -1, "phase": "base", **base_metrics}]
     save_metrics(base_metrics, config.output_dir, "base")
@@ -54,20 +58,23 @@ def run_pipeline(config: IterReasonConfig):
         grpo_dir = os.path.join(config.output_dir, f"iter_{it}", "grpo")
         current_model = run_grpo(
             current_model, grpo_dir, train_dataset, config,
+            run_name=f"iter{it}-grpo",
         )
         grpo_metrics = evaluate_model(
-            current_model, eval_datasets, config, full=False,
+            current_model, eval_datasets, config, full=every_eval_full,
         )
         records.append({"iteration": it, "phase": "grpo", **grpo_metrics})
         save_metrics(grpo_metrics, config.output_dir, f"iter{it}_grpo")
+        save_all_metrics(records, config.output_dir)
 
         # ── Phase B: Self-Distillation ─────────────────────────
         distill_dir = os.path.join(config.output_dir, f"iter_{it}", "distill")
         current_model = run_distillation(
             current_model, distill_dir, train_dataset, config,
+            run_name=f"iter{it}-distill",
         )
         distill_metrics = evaluate_model(
-            current_model, eval_datasets, config, full=False,
+            current_model, eval_datasets, config, full=every_eval_full,
         )
         records.append(
             {"iteration": it, "phase": "distill", **distill_metrics}
@@ -75,6 +82,7 @@ def run_pipeline(config: IterReasonConfig):
         save_metrics(
             distill_metrics, config.output_dir, f"iter{it}_distill",
         )
+        save_all_metrics(records, config.output_dir)
 
         # ── Iteration summary ─────────────────────────────────
         _log_iteration_summary(it, grpo_metrics, distill_metrics)
@@ -83,13 +91,19 @@ def run_pipeline(config: IterReasonConfig):
     log(f"\n{'═' * 60}")
     log("  FINAL EVALUATION  (with pass@k)")
     log(f"{'═' * 60}")
-    final_metrics = evaluate_model(
-        current_model, eval_datasets, config, full=True,
-    )
+    if every_eval_full:
+        # the last phase was already evaluated with pass@k — don't redo it
+        final_metrics = {k: v for k, v in records[-1].items()
+                         if k not in ("iteration", "phase")}
+    else:
+        final_metrics = evaluate_model(
+            current_model, eval_datasets, config, full=True,
+        )
     records.append(
         {"iteration": config.num_iterations, "phase": "final",
          **final_metrics}
     )
+    save_metrics(final_metrics, config.output_dir, "final")
 
     save_all_metrics(records, config.output_dir)
 
@@ -102,9 +116,7 @@ def run_pipeline(config: IterReasonConfig):
 
 def _log_iteration_summary(it, grpo_m, distill_m):
     log(f"\n┌── Iteration {it} summary")
-    for ds in set(
-        k.split("/")[0] for k in grpo_m if "/" in k
-    ):
+    for ds in sorted({k.split("/")[0] for k in grpo_m if "/" in k}):
         ga = grpo_m.get(f"{ds}/accuracy", 0)
         da = distill_m.get(f"{ds}/accuracy", 0)
         gt = grpo_m.get(f"{ds}/avg_tokens", 0)

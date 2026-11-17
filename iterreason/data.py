@@ -10,6 +10,7 @@ from typing import Dict
 
 from datasets import Dataset, concatenate_datasets, load_dataset
 
+from .reward import extract_boxed, normalise
 from .utils import log
 
 SYSTEM_PROMPT = (
@@ -18,48 +19,36 @@ SYSTEM_PROMPT = (
     "Put your final answer inside \\boxed{}."
 )
 
-
-# ── Answer extraction helpers ──────────────────────────────────
-
-def _extract_boxed(text: str) -> str | None:
-    """Pull content from the *last* \\boxed{…}, handling nested braces."""
-    idx = text.rfind("\\boxed{")
-    if idx == -1:
-        return None
-    idx += len("\\boxed{")
-    depth, buf = 1, []
-    while idx < len(text) and depth > 0:
-        ch = text[idx]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                break
-        buf.append(ch)
-        idx += 1
-    return "".join(buf).strip() or None
+SUPPORTED_DATASETS = ("gsm8k", "math")
 
 
-def _normalise_number(s: str) -> str:
-    s = s.replace(",", "").replace(" ", "").strip().strip("$")
-    try:
-        v = float(s)
-        return str(int(v)) if v == int(v) else str(v)
-    except ValueError:
-        return s
+def _subsample(ds: Dataset, n: int, seed: int) -> Dataset:
+    """Random (seeded) subset of size n; n <= 0 means use everything.
+
+    Shuffling first matters for MATH, whose splits are grouped by subject —
+    taking the first n rows would evaluate on a single subject."""
+    if 0 < n < len(ds):
+        ds = ds.shuffle(seed=seed).select(range(n))
+    return ds
+
+
+def _drop_unanswerable(ds: Dataset, name: str) -> Dataset:
+    before = len(ds)
+    ds = ds.filter(lambda ex: bool(ex["answer"]))
+    if len(ds) < before:
+        log(f"{name}: dropped {before - len(ds)} examples with no parsable answer")
+    return ds
 
 
 # ── Dataset loaders ────────────────────────────────────────────
 
-def load_gsm8k(split: str = "train", n: int = -1) -> Dataset:
+def load_gsm8k(split: str = "train", n: int = -1, seed: int = 42) -> Dataset:
     ds = load_dataset("openai/gsm8k", "main", split=split)
-    if 0 < n < len(ds):
-        ds = ds.select(range(n))
+    ds = _subsample(ds, n, seed)
 
     def _proc(ex):
-        match = re.search(r"####\s*(-?[\d,]+\.?\d*)", ex["answer"])
-        ans = _normalise_number(match.group(1)) if match else ""
+        match = re.search(r"####\s*(-?[\d,]*\.?\d+)", ex["answer"])
+        ans = normalise(match.group(1)) if match else ""
         return {
             "prompt": [
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -69,16 +58,21 @@ def load_gsm8k(split: str = "train", n: int = -1) -> Dataset:
             "source": "gsm8k",
         }
 
-    return ds.map(_proc, remove_columns=ds.column_names)
+    ds = ds.map(_proc, remove_columns=ds.column_names)
+    return _drop_unanswerable(ds, "GSM8K")
 
 
-def load_math_dataset(split: str = "train", n: int = -1) -> Dataset:
-    ds = load_dataset("hendrycks/competition_math", split=split)
-    if 0 < n < len(ds):
-        ds = ds.select(range(n))
+def load_math_dataset(
+    split: str = "train",
+    n: int = -1,
+    seed: int = 42,
+    dataset_name: str = "DigitalLearningGmbH/MATH-lighteval",
+) -> Dataset:
+    ds = load_dataset(dataset_name, split=split)
+    ds = _subsample(ds, n, seed)
 
     def _proc(ex):
-        ans = _extract_boxed(ex["solution"]) or ""
+        ans = extract_boxed(ex["solution"]) or ""
         return {
             "prompt": [
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -88,7 +82,8 @@ def load_math_dataset(split: str = "train", n: int = -1) -> Dataset:
             "source": "math",
         }
 
-    return ds.map(_proc, remove_columns=ds.column_names)
+    ds = ds.map(_proc, remove_columns=ds.column_names)
+    return _drop_unanswerable(ds, "MATH")
 
 
 # ── Public API ─────────────────────────────────────────────────
@@ -96,13 +91,20 @@ def load_math_dataset(split: str = "train", n: int = -1) -> Dataset:
 def load_training_data(config) -> Dataset:
     parts = []
     if "gsm8k" in config.task_datasets:
-        d = load_gsm8k("train", config.gsm8k_train_samples)
+        d = load_gsm8k("train", config.gsm8k_train_samples, config.seed)
         log(f"GSM8K train: {len(d)} examples")
         parts.append(d)
     if "math" in config.task_datasets:
-        d = load_math_dataset("train", config.math_train_samples)
+        d = load_math_dataset(
+            "train", config.math_train_samples, config.seed, config.math_dataset,
+        )
         log(f"MATH train : {len(d)} examples")
         parts.append(d)
+    if not parts:
+        raise ValueError(
+            f"No supported datasets in task_datasets={config.task_datasets}; "
+            f"choose from {SUPPORTED_DATASETS}"
+        )
     combined = concatenate_datasets(parts).shuffle(seed=config.seed)
     log(f"Combined train: {len(combined)} examples")
     return combined
@@ -111,11 +113,13 @@ def load_training_data(config) -> Dataset:
 def load_eval_data(config) -> Dict[str, Dataset]:
     out = {}
     if "gsm8k" in config.task_datasets:
-        d = load_gsm8k("test", config.eval_samples)
+        d = load_gsm8k("test", config.eval_samples, config.seed)
         log(f"GSM8K test : {len(d)} examples")
         out["gsm8k"] = d
     if "math" in config.task_datasets:
-        d = load_math_dataset("test", config.eval_samples)
+        d = load_math_dataset(
+            "test", config.eval_samples, config.seed, config.math_dataset,
+        )
         log(f"MATH test  : {len(d)} examples")
         out["math"] = d
     return out

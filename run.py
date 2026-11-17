@@ -18,11 +18,14 @@ Usage
 
     # Custom base model
     python run.py --base_model Qwen/Qwen2.5-3B-Instruct --lora_r 32
+
+    # Boolean options take --flag / --no-flag, e.g.
+    python run.py --no-use_wandb --no-use_lora
 """
 
 import argparse
-import sys
-from dataclasses import fields
+import typing
+from dataclasses import MISSING, fields
 
 from iterreason.config import IterReasonConfig
 from iterreason.pipeline import run_pipeline
@@ -35,22 +38,29 @@ def main():
     )
 
     # auto-generate CLI flags from every field in the config dataclass
+    hints = typing.get_type_hints(IterReasonConfig)
     for f in fields(IterReasonConfig):
         flag = f"--{f.name}"
-        if f.type is bool:
+        ftype = hints[f.name]
+        default = (f.default_factory() if f.default_factory is not MISSING
+                   else f.default)
+        if ftype is bool:
+            # --flag / --no-flag  (the old store_false trick meant that
+            # passing --use_wandb actually *disabled* wandb)
             parser.add_argument(
-                flag,
-                action="store_true" if not f.default else "store_false",
-                default=f.default,
+                flag, action=argparse.BooleanOptionalAction, default=default,
             )
-        elif hasattr(f.type, "__origin__"):          # List[str], List[int]
-            inner = f.type.__args__[0]
-            parser.add_argument(flag, nargs="+", type=inner, default=f.default)
+        elif typing.get_origin(ftype) in (list, typing.List):
+            inner = typing.get_args(ftype)[0]
+            parser.add_argument(flag, nargs="+", type=inner, default=default)
         else:
-            parser.add_argument(flag, type=f.type, default=f.default)
+            parser.add_argument(flag, type=ftype, default=default)
 
     args = parser.parse_args()
-    config = IterReasonConfig(**vars(args))
+    try:
+        config = IterReasonConfig(**vars(args))
+    except ValueError as e:
+        parser.error(str(e))
 
     final_model, metrics = run_pipeline(config)
     print(f"\n✓  Done.  Final model at: {final_model}")
