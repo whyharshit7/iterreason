@@ -1,6 +1,6 @@
-torch>=2.1.0
-transformers>=4.44.0
-trl>=0.15.0
+torch>=2.4.0
+transformers>=4.56.0
+trl>=0.20.0
 datasets>=2.18.0
 peft>=0.13.0
 accelerate>=0.34.0
@@ -8,3 +8,8 @@ wandb
 sympy
 numpy
 tqdm
+
+# Optional
+# vllm          # --use_vllm / --grpo_use_vllm
+# flash-attn    # used automatically for generation when installed
+# pytest        # tests/

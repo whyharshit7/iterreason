@@ -33,8 +33,9 @@ pip install -r requirements.txt
 
 Optional:
 
-- `wandb` logging is enabled by default
-- `vLLM` can be used for faster distillation-time generation via `--use_vllm`
+- `wandb` logging is enabled by default (disable with `--no-use_wandb`)
+- `vLLM` can be used for faster distillation-time generation via `--use_vllm`, and for GRPO rollouts via `--grpo_use_vllm`
+- `flash-attn` is used for generation automatically when installed (otherwise PyTorch SDPA)
 
 ## Quick Start
 
@@ -68,7 +69,9 @@ python run.py --use_vllm
 
 ## Configuration
 
-Most runtime settings live in `iterreason/config.py`. The CLI is auto-generated from the `IterReasonConfig` dataclass, so each config field can be overridden from the command line.
+Most runtime settings live in `iterreason/config.py`. The CLI is auto-generated from the `IterReasonConfig` dataclass, so each config field can be overridden from the command line. Boolean options take `--flag` / `--no-flag` (e.g. `--no-use_lora`). Invalid combinations (for example a GRPO batch that isn't divisible by `grpo_num_generations`) are rejected at startup, before any model is loaded.
+
+The MATH data is loaded from `--math_dataset` (default `DigitalLearningGmbH/MATH-lighteval`), since the original `hendrycks/competition_math` repository is no longer available on the Hugging Face Hub. Any mirror with `problem`/`solution` columns and `train`/`test` splits works.
 
 Key settings include:
 
@@ -87,6 +90,8 @@ Key settings include:
 - `iterreason/evaluate.py`: evaluation
 - `iterreason/data.py`: dataset loading
 - `iterreason/reward.py`: reward functions and answer matching
+- `iterreason/generation.py`: batched generation shared by evaluation and distillation
+- `tests/`: unit tests (`pytest tests`)
 
 ## Outputs
 
@@ -94,10 +99,11 @@ By default, artifacts are written under `outputs/`, including:
 
 - per-iteration GRPO and distillation checkpoints
 - merged model outputs
-- evaluation metrics saved across the run
+- evaluation metrics saved across the run (`all_metrics.json` is updated after every phase)
+- raw distillation traces (`raw_traces.json`), reused automatically if a run is restarted
 
 ## Notes
 
 - The default base model is `Qwen/Qwen2.5-7B-Instruct`.
-- `use_wandb=True` by default, so set up Weights & Biases or disable it with `--use_wandb`.
+- `use_wandb=True` by default, so set up Weights & Biases or disable it with `--no-use_wandb`. Each phase is logged as its own run (`iter0-grpo`, `iter0-distill`, …) in the `--wandb_project` project.
 - Training and generation settings assume a reasonably capable GPU environment.

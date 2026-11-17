@@ -8,7 +8,6 @@ using group-level advantages (no critic needed).
 
 import os
 
-import torch
 from peft import LoraConfig
 from trl import GRPOConfig, GRPOTrainer
 
@@ -17,10 +16,17 @@ from .reward import (
     correctness_reward_fn,
     format_reward_fn,
 )
-from .utils import log, merge_lora_and_save
+from .utils import (
+    filter_config_kwargs,
+    finish_wandb,
+    free_memory,
+    log,
+    merge_lora_and_save,
+)
 
 
-def run_grpo(model_path: str, output_dir: str, train_dataset, config):
+def run_grpo(model_path: str, output_dir: str, train_dataset, config,
+             run_name: str = "grpo"):
     """
     Train one GRPO round.
 
@@ -35,7 +41,9 @@ def run_grpo(model_path: str, output_dir: str, train_dataset, config):
         f"{config.grpo_num_generations} generations")
 
     # ── Training arguments ─────────────────────────────────────
-    grpo_args = GRPOConfig(
+    # Filtered so that fields renamed/removed across TRL versions
+    # (e.g. max_prompt_length) don't crash the run.
+    grpo_kwargs = dict(
         output_dir=output_dir,
         # generation
         num_generations=config.grpo_num_generations,
@@ -56,11 +64,17 @@ def run_grpo(model_path: str, output_dir: str, train_dataset, config):
         save_steps=config.save_steps,
         save_total_limit=2,
         report_to="wandb" if config.use_wandb else "none",
-        run_name="grpo",
+        run_name=run_name,
         seed=config.seed,
-        # vLLM backend (optional)
-        use_vllm=config.use_vllm,
+        # vLLM backend for rollouts (colocated, no separate server needed)
+        use_vllm=config.grpo_use_vllm,
     )
+    if config.grpo_use_vllm:
+        grpo_kwargs.update(
+            vllm_mode="colocate",
+            vllm_gpu_memory_utilization=min(config.vllm_gpu_utilization, 0.5),
+        )
+    grpo_args = GRPOConfig(**filter_config_kwargs(GRPOConfig, grpo_kwargs))
 
     # ── LoRA (optional) ────────────────────────────────────────
     peft_config = None
@@ -89,19 +103,22 @@ def run_grpo(model_path: str, output_dir: str, train_dataset, config):
         peft_config=peft_config,
     )
 
-    train_result = trainer.train()
-    log(f"GRPO training loss: {train_result.training_loss:.4f}")
+    try:
+        train_result = trainer.train()
+        log(f"GRPO training loss: {train_result.training_loss:.4f}")
 
-    # ── Save merged model ──────────────────────────────────────
-    merged_dir = os.path.join(output_dir, "merged")
-    if config.use_lora:
-        merge_lora_and_save(trainer.model, trainer.processing_class, merged_dir)
-    else:
-        trainer.save_model(merged_dir)
-        trainer.processing_class.save_pretrained(merged_dir)
-
-    del trainer
-    torch.cuda.empty_cache()
+        # ── Save merged model ──────────────────────────────────
+        merged_dir = os.path.join(output_dir, "merged")
+        if config.use_lora:
+            merge_lora_and_save(trainer.model, trainer.processing_class,
+                                merged_dir)
+        else:
+            trainer.save_model(merged_dir)
+            trainer.processing_class.save_pretrained(merged_dir)
+    finally:
+        del trainer
+        free_memory()
+        finish_wandb()
 
     log(f"GRPO complete → {merged_dir}")
     return merged_dir
